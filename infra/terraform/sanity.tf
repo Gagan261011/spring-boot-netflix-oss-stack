@@ -5,7 +5,8 @@ resource "null_resource" "wait_for_services" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "Waiting for all services to be fully ready..."
-      sleep 300
+      echo "This takes approximately 15-20 minutes for all services to deploy and start."
+      sleep 900
       echo "Services should be ready now."
     EOT
     interpreter = ["bash", "-c"]

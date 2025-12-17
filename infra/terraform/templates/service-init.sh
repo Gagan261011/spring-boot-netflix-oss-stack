@@ -45,12 +45,12 @@ chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
 chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/9] Waiting for Eureka Server..."
-for i in {1..60}; do
+for i in {1..90}; do
     if curl -s http://$EUREKA_HOST:8761/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "Eureka Server is available!"
         break
     fi
-    echo "Waiting for Eureka Server at $EUREKA_HOST:8761... ($i/60)"
+    echo "Waiting for Eureka Server at $EUREKA_HOST:8761... ($i/90)"
     sleep 10
 done
 
@@ -111,16 +111,18 @@ systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
 echo "[9/9] Waiting for service to be healthy..."
-for i in {1..60}; do
-    if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
-        echo "$SERVICE_NAME is UP!"
+# Core-backend uses port 8082 from config-repo, not the terraform port variable
+ACTUAL_PORT=8082
+for i in {1..90}; do
+    if curl -s http://localhost:$ACTUAL_PORT/actuator/health | grep -q '"status":"UP"'; then
+        echo "$SERVICE_NAME is UP on port $ACTUAL_PORT!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    echo "Waiting for $SERVICE_NAME on port $ACTUAL_PORT... ($i/90)"
     sleep 5
 done
 
 echo "=========================================="
 echo "$SERVICE_NAME provisioning complete!"
-echo "Service URL: http://$PRIVATE_IP:$SERVICE_PORT"
+echo "Service URL: http://$PRIVATE_IP:8082"
 echo "=========================================="

@@ -44,12 +44,12 @@ chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
 chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/9] Waiting for Config Server..."
-for i in {1..60}; do
+for i in {1..90}; do
     if curl -s http://$CONFIG_HOST:8888/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "Config Server is available!"
         break
     fi
-    echo "Waiting for Config Server at $CONFIG_HOST:8888... ($i/60)"
+    echo "Waiting for Config Server at $CONFIG_HOST:8888... ($i/90)"
     sleep 10
 done
 
@@ -111,12 +111,12 @@ systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
 echo "[9/9] Waiting for service to be healthy..."
-for i in {1..60}; do
+for i in {1..90}; do
     if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
-        echo "$SERVICE_NAME is UP!"
+        echo "$SERVICE_NAME is UP on port $SERVICE_PORT!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    echo "Waiting for $SERVICE_NAME on port $SERVICE_PORT... ($i/90)"
     sleep 5
 done
 

@@ -49,12 +49,13 @@ chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
 chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/11] Waiting for mTLS Middleware to be available..."
-for i in {1..120}; do
-    if curl -s http://$MIDDLEWARE_HOST:8444/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
-        echo "mTLS Middleware is available!"
+for i in {1..150}; do
+    # Check if middleware's cert server is available on port 9999
+    if curl -s http://$MIDDLEWARE_HOST:9999/ 2>/dev/null | grep -q "client-keystore.p12"; then
+        echo "mTLS Middleware cert server is available!"
         break
     fi
-    echo "Waiting for mTLS Middleware at $MIDDLEWARE_HOST:8444... ($i/120)"
+    echo "Waiting for mTLS Middleware cert server at $MIDDLEWARE_HOST:9999... ($i/150)"
     sleep 10
 done
 
@@ -62,8 +63,7 @@ echo "[5/11] Fetching client certificates from middleware..."
 CERTS_DIR="/opt/$SERVICE_NAME/certs"
 cd $CERTS_DIR
 
-# Fetch certificates via HTTP endpoint
-# The middleware exposes certs via a simple endpoint
+# Fetch certificates from middleware's cert server on port 9999
 MAX_RETRIES=30
 RETRY_DELAY=10
 CERTS_FETCHED=false
@@ -71,74 +71,24 @@ CERTS_FETCHED=false
 for i in $(seq 1 $MAX_RETRIES); do
     echo "Attempting to fetch certificates (attempt $i of $MAX_RETRIES)..."
     
-    # Try fetching from middleware's cert endpoint
-    if curl -sf "http://$MIDDLEWARE_HOST:8444/certs/root-ca.pem" -o root-ca.pem 2>/dev/null && \
-       curl -sf "http://$MIDDLEWARE_HOST:8444/certs/client-keystore.p12" -o client-keystore.p12 2>/dev/null && \
-       curl -sf "http://$MIDDLEWARE_HOST:8444/certs/client-truststore.p12" -o client-truststore.p12 2>/dev/null; then
-        echo "Certificates fetched from middleware endpoint!"
+    # Fetch from middleware's cert server on port 9999
+    if curl -sf "http://$MIDDLEWARE_HOST:9999/root-ca.pem" -o root-ca.pem 2>/dev/null && \
+       curl -sf "http://$MIDDLEWARE_HOST:9999/client-keystore.p12" -o client-keystore.p12 2>/dev/null && \
+       curl -sf "http://$MIDDLEWARE_HOST:9999/client-truststore.p12" -o client-truststore.p12 2>/dev/null; then
+        echo "Certificates fetched from middleware successfully!"
         CERTS_FETCHED=true
         break
     fi
     
-    echo "Cert endpoint not available, will generate matching certs locally..."
+    echo "Cert fetch failed, retrying in $RETRY_DELAY seconds..."
     sleep $RETRY_DELAY
 done
 
-# If certs not fetched from middleware, generate matching ones
-# This requires generating certs with the SAME CA that middleware uses
 if [ "$CERTS_FETCHED" != "true" ]; then
-    echo "Generating client certificates locally (matching middleware CA)..."
-    
-    # Generate Root CA (MUST match middleware's CA for mTLS to work)
-    # In production, you'd share the CA via secure means
-    openssl genrsa -out root-ca-key.pem 4096
-    openssl req -x509 -new -nodes -key root-ca-key.pem -sha256 -days 3650 -out root-ca.pem \
-        -subj "/C=US/ST=California/L=SF/O=Netflix/OU=DevOps/CN=RootCA"
-
-    # Generate Client Cert
-    cat > client-san.cnf << EOF
-[req]
-default_bits = 2048
-prompt = no
-default_md = sha256
-distinguished_name = dn
-req_extensions = req_ext
-x509_extensions = v3_ext
-[dn]
-C = US
-O = Netflix
-CN = user-bff
-[req_ext]
-subjectAltName = @alt_names
-[v3_ext]
-subjectAltName = @alt_names
-[alt_names]
-DNS.1 = user-bff
-DNS.2 = localhost
-DNS.3 = $HOSTNAME
-IP.1 = 127.0.0.1
-IP.2 = $PRIVATE_IP
-EOF
-
-    openssl genrsa -out client-key.pem 2048
-    openssl req -new -key client-key.pem -out client.csr -config client-san.cnf
-    openssl x509 -req -in client.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial \
-        -out client-cert.pem -days 3650 -sha256 -extensions v3_ext -extfile client-san.cnf
-
-    # Create Client Keystore
-    openssl pkcs12 -export -in client-cert.pem -inkey client-key.pem \
-        -out client-keystore.p12 -name "client" -CAfile root-ca.pem \
-        -caname "root" -password "pass:$PASSWORD"
-
-    # Create Client Truststore
-    keytool -importcert -alias root-ca -file root-ca.pem -keystore client-truststore.p12 \
-        -storetype PKCS12 -storepass "$PASSWORD" -noprompt
-
-    # Cleanup
-    rm -f *.csr *.srl *.cnf
-    
-    echo "WARNING: Generated local certificates - mTLS may fail if CA doesn't match middleware!"
-    echo "For mTLS to work, both services must use the same CA."
+    echo "ERROR: Failed to fetch certificates from middleware after $MAX_RETRIES attempts!"
+    echo "Checking middleware cert server status..."
+    curl -v http://$MIDDLEWARE_HOST:9999/ 2>&1 || true
+    exit 1
 fi
 
 # Set permissions
@@ -213,25 +163,27 @@ systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
 echo "[10/11] Waiting for service to be healthy..."
-for i in {1..60}; do
-    if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
-        echo "$SERVICE_NAME is UP!"
+# User-BFF uses port 8081 from config-repo
+ACTUAL_PORT=8081
+for i in {1..90}; do
+    if curl -s http://localhost:$ACTUAL_PORT/actuator/health | grep -q '"status":"UP"'; then
+        echo "$SERVICE_NAME is UP on port $ACTUAL_PORT!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    echo "Waiting for $SERVICE_NAME on port $ACTUAL_PORT... ($i/90)"
     sleep 5
 done
 
 echo "[11/11] Testing REST endpoint..."
 sleep 10
-curl -s -X POST http://localhost:$SERVICE_PORT/api/rest/echo \
+curl -s -X POST http://localhost:8081/api/rest/echo \
     -H "Content-Type: application/json" \
     -d '{"type":"test","message":"hello","amount":100}' || echo "REST endpoint test pending..."
 
 echo "=========================================="
 echo "User BFF provisioning complete!"
-echo "Service URL: http://$PRIVATE_IP:$SERVICE_PORT"
-echo "REST: http://$PRIVATE_IP:$SERVICE_PORT/api/rest/echo"
-echo "SOAP: http://$PRIVATE_IP:$SERVICE_PORT/ws"
-echo "GraphQL: http://$PRIVATE_IP:$SERVICE_PORT/graphql"
+echo "Service URL: http://$PRIVATE_IP:8081"
+echo "REST: http://$PRIVATE_IP:8081/api/rest/echo"
+echo "SOAP: http://$PRIVATE_IP:8081/ws"
+echo "GraphQL: http://$PRIVATE_IP:8081/graphql"
 echo "=========================================="

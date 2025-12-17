@@ -48,12 +48,12 @@ chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
 chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/11] Waiting for Core Backend to be available..."
-for i in {1..90}; do
+for i in {1..120}; do
     if curl -s http://$BACKEND_HOST:8082/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "Core Backend is available!"
         break
     fi
-    echo "Waiting for Core Backend at $BACKEND_HOST:8082... ($i/90)"
+    echo "Waiting for Core Backend at $BACKEND_HOST:8082... ($i/120)"
     sleep 10
 done
 
@@ -194,7 +194,56 @@ mvn -pl services/mtls-middleware -am clean package -DskipTests -q || {
 cp /opt/$SERVICE_NAME/repo/services/mtls-middleware/target/mtls-middleware.jar /opt/$SERVICE_NAME/app.jar
 chown $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME/app.jar
 
-echo "[8/11] Creating systemd service..."
+echo "[8/11] Setting up certificate HTTP server for user-bff..."
+# Start a simple Python HTTP server to serve certs to user-bff
+cat > /opt/$SERVICE_NAME/certs/serve_certs.py << 'PYEOF'
+#!/usr/bin/env python3
+import http.server
+import socketserver
+import os
+
+PORT = 9999
+DIRECTORY = "/opt/mtls-middleware/certs"
+
+class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=DIRECTORY, **kwargs)
+    
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        super().end_headers()
+
+os.chdir(DIRECTORY)
+with socketserver.TCPServer(("", PORT), CORSRequestHandler) as httpd:
+    print(f"Serving certs on port {PORT}")
+    httpd.serve_forever()
+PYEOF
+chmod +x /opt/$SERVICE_NAME/certs/serve_certs.py
+
+# Create systemd service for cert server
+cat > /etc/systemd/system/cert-server.service << EOF
+[Unit]
+Description=Certificate HTTP Server for mTLS
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/$SERVICE_NAME/certs/serve_certs.py
+WorkingDirectory=/opt/$SERVICE_NAME/certs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable cert-server
+systemctl start cert-server
+echo "Certificate server started on port 9999"
+
+echo "[9/11] Creating systemd service..."
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
 Description=mTLS Middleware Service
@@ -231,34 +280,39 @@ StandardError=append:/var/log/$SERVICE_NAME/$SERVICE_NAME-error.log
 WantedBy=multi-user.target
 EOF
 
-echo "[9/11] Starting service..."
+echo "[10/11] Starting service..."
 systemctl daemon-reload
 systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
-echo "[10/11] Waiting for service to be healthy..."
-for i in {1..60}; do
-    # Check management port (HTTP)
-    if curl -s http://localhost:8444/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
+echo "[11/12] Waiting for service to be healthy..."
+for i in {1..90}; do
+    # Check management port (HTTP) - middleware uses port 8443 for HTTPS, but may have separate management port
+    if curl -s http://localhost:8080/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "$SERVICE_NAME is UP!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    # Also try the HTTPS port with -k to skip cert verification
+    if curl -sk https://localhost:$SERVICE_PORT/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
+        echo "$SERVICE_NAME HTTPS is UP!"
+        break
+    fi
+    echo "Waiting... ($i/90)"
     sleep 5
 done
 
-echo "[11/11] Testing HTTPS endpoint..."
+echo "[12/12] Testing HTTPS endpoint..."
 sleep 5
 curl -sk https://localhost:$SERVICE_PORT/actuator/health || echo "HTTPS requires client cert (expected)"
 
 echo "=========================================="
 echo "mTLS Middleware provisioning complete!"
 echo "HTTPS Port: $SERVICE_PORT (requires client cert)"
-echo "Management Port: 8444 (HTTP)"
+echo "Cert Server Port: 9999 (HTTP)"
 echo "Private IP: $PRIVATE_IP"
 echo ""
 echo "Client certs for user-bff available at:"
-echo "  - /opt/$SERVICE_NAME/certs/client-keystore.p12"
-echo "  - /opt/$SERVICE_NAME/certs/client-truststore.p12"
-echo "  - /opt/$SERVICE_NAME/certs/root-ca.pem"
+echo "  - http://$PRIVATE_IP:9999/client-keystore.p12"
+echo "  - http://$PRIVATE_IP:9999/client-truststore.p12"
+echo "  - http://$PRIVATE_IP:9999/root-ca.pem"
 echo "=========================================="

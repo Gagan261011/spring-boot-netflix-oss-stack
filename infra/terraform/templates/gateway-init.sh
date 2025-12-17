@@ -46,12 +46,12 @@ chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
 chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/9] Waiting for User BFF to be available..."
-for i in {1..120}; do
+for i in {1..150}; do
     if curl -s http://$USERBFF_HOST:8081/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "User BFF is available!"
         break
     fi
-    echo "Waiting for User BFF at $USERBFF_HOST:8081... ($i/120)"
+    echo "Waiting for User BFF at $USERBFF_HOST:8081... ($i/150)"
     sleep 10
 done
 
@@ -114,17 +114,19 @@ systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
 echo "[9/9] Waiting for service to be healthy..."
-for i in {1..60}; do
-    if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
-        echo "$SERVICE_NAME is UP!"
+# Cloud Gateway uses port 8080 from config-repo
+ACTUAL_PORT=8080
+for i in {1..90}; do
+    if curl -s http://localhost:$ACTUAL_PORT/actuator/health | grep -q '"status":"UP"'; then
+        echo "$SERVICE_NAME is UP on port $ACTUAL_PORT!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    echo "Waiting for $SERVICE_NAME on port $ACTUAL_PORT... ($i/90)"
     sleep 5
 done
 
 echo "=========================================="
 echo "Cloud Gateway provisioning complete!"
-echo "Public URL: http://$PUBLIC_IP:$SERVICE_PORT"
-echo "Private URL: http://$PRIVATE_IP:$SERVICE_PORT"
+echo "Public URL: http://$PUBLIC_IP:8080"
+echo "Private URL: http://$PRIVATE_IP:8080"
 echo "=========================================="

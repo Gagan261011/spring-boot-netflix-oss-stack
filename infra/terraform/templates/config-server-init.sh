@@ -116,12 +116,12 @@ systemctl start $SERVICE_NAME
 
 # Wait for service to be healthy
 echo "Waiting for Config Server to be healthy..."
-for i in {1..60}; do
+for i in {1..90}; do
     if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
         echo "Config Server is UP!"
         break
     fi
-    echo "Waiting... ($i/60)"
+    echo "Waiting for Config Server on port $SERVICE_PORT... ($i/90)"
     sleep 5
 done
 
