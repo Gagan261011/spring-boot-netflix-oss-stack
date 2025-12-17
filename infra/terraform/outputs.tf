@@ -3,6 +3,11 @@ output "gateway_public_url" {
   value       = "http://${aws_instance.cloud_gateway.public_ip}:8080"
 }
 
+output "eureka_public_url" {
+  description = "Public URL for the Eureka Dashboard"
+  value       = "http://${aws_instance.eureka_server.public_ip}:8761"
+}
+
 output "gateway_public_ip" {
   description = "Public IP of the Cloud Gateway"
   value       = aws_instance.cloud_gateway.public_ip

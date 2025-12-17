@@ -33,7 +33,7 @@ resource "aws_instance" "eureka_server" {
   instance_type          = var.instance_type
   key_name               = var.key_pair_name
   subnet_id              = data.aws_subnet.selected.id
-  vpc_security_group_ids = [aws_security_group.internal.id]
+  vpc_security_group_ids = [aws_security_group.internal.id, aws_security_group.eureka.id]
 
   root_block_device {
     volume_size = 20

@@ -109,3 +109,22 @@ resource "aws_security_group" "gateway" {
     Name = "${var.project_name}-gateway-sg"
   }
 }
+
+# Security Group for Eureka (public facing for dashboard)
+resource "aws_security_group" "eureka" {
+  name        = "${var.project_name}-eureka-sg"
+  description = "Security group for Eureka Dashboard"
+  vpc_id      = data.aws_vpc.default.id
+
+  # Eureka port 8761 open to admin
+  ingress {
+    from_port   = 8761
+    to_port     = 8761
+    protocol    = "tcp"
+    cidr_blocks = [var.admin_cidr]
+  }
+
+  tags = {
+    Name = "${var.project_name}-eureka-sg"
+  }
+}
