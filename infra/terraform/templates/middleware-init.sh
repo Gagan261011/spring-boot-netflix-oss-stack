@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # mTLS Middleware Initialization Script
-# Generates certs and starts middleware service
+# Generates certs with dynamic IPs and starts middleware service
 #
 
 set -e
@@ -23,39 +23,60 @@ BACKEND_HOST="${backend_host}"
 JAVA_OPTS="${java_opts}"
 PASSWORD="changeit"
 
+# Get instance metadata - CRITICAL for dynamic IPs
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+PRIVATE_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+PUBLIC_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "127.0.0.1")
+HOSTNAME=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-hostname)
+
+echo "Instance Info: Private=$PRIVATE_IP, Public=$PUBLIC_IP, Hostname=$HOSTNAME"
+
 # System update and dependencies
 echo "[1/11] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get upgrade -y
+apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 echo "[2/11] Installing Java 17, Maven, Git, and OpenSSL..."
 apt-get install -y openjdk-17-jdk maven git curl jq openssl
 
 echo "[3/11] Creating service user and directories..."
-useradd -r -s /bin/false apps || true
+useradd -r -s /bin/false $SERVICE_NAME || true
 mkdir -p /opt/$SERVICE_NAME/certs
 mkdir -p /var/log/$SERVICE_NAME
-chown -R apps:apps /opt/$SERVICE_NAME
-chown -R apps:apps /var/log/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/11] Waiting for Core Backend to be available..."
 for i in {1..90}; do
-    if curl -s http://$BACKEND_HOST:8082/actuator/health | grep -q '"status":"UP"'; then
+    if curl -s http://$BACKEND_HOST:8082/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "Core Backend is available!"
         break
     fi
-    echo "Waiting for Core Backend... ($i/90)"
+    echo "Waiting for Core Backend at $BACKEND_HOST:8082... ($i/90)"
     sleep 10
 done
 
-echo "[5/11] Cloning repository..."
+echo "[5/11] Cloning repository (with retries)..."
 cd /opt/$SERVICE_NAME
-git clone --branch $GIT_BRANCH $GIT_REPO_URL repo || {
-    echo "Git clone failed!"
-    mkdir -p repo
-}
+MAX_RETRIES=10
+RETRY_DELAY=30
+for i in $(seq 1 $MAX_RETRIES); do
+    echo "Git clone attempt $i of $MAX_RETRIES..."
+    if git clone --branch $GIT_BRANCH $GIT_REPO_URL repo; then
+        echo "Git clone successful!"
+        break
+    else
+        echo "Git clone failed, waiting $RETRY_DELAY seconds..."
+        sleep $RETRY_DELAY
+        if [ $i -eq $MAX_RETRIES ]; then
+            echo "ERROR: Git clone failed after $MAX_RETRIES attempts!"
+            exit 1
+        fi
+    fi
+done
 
-echo "[6/11] Generating mTLS certificates..."
+echo "[6/11] Generating mTLS certificates with dynamic IPs..."
 CERTS_DIR="/opt/$SERVICE_NAME/certs"
 cd $CERTS_DIR
 
@@ -64,7 +85,7 @@ openssl genrsa -out root-ca-key.pem 4096
 openssl req -x509 -new -nodes -key root-ca-key.pem -sha256 -days 3650 -out root-ca.pem \
     -subj "/C=US/ST=California/L=SF/O=Netflix/OU=DevOps/CN=RootCA"
 
-# Generate Middleware Server Cert
+# Generate Middleware Server Cert with DYNAMIC IPs
 cat > middleware-san.cnf << EOF
 [req]
 default_bits = 2048
@@ -72,6 +93,7 @@ prompt = no
 default_md = sha256
 distinguished_name = dn
 req_extensions = req_ext
+x509_extensions = v3_ext
 [dn]
 C = US
 ST = California
@@ -81,18 +103,29 @@ OU = Middleware
 CN = mtls-middleware
 [req_ext]
 subjectAltName = @alt_names
+[v3_ext]
+subjectAltName = @alt_names
 [alt_names]
 DNS.1 = mtls-middleware
 DNS.2 = localhost
-DNS.3 = *.compute.amazonaws.com
-DNS.4 = *.ec2.internal
+DNS.3 = $HOSTNAME
+DNS.4 = *.compute.amazonaws.com
+DNS.5 = *.ec2.internal
 IP.1 = 127.0.0.1
+IP.2 = $PRIVATE_IP
+IP.3 = $PUBLIC_IP
 EOF
+
+echo "Middleware SAN config:"
+cat middleware-san.cnf
 
 openssl genrsa -out middleware-key.pem 2048
 openssl req -new -key middleware-key.pem -out middleware.csr -config middleware-san.cnf
 openssl x509 -req -in middleware.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial \
-    -out middleware-cert.pem -days 3650 -sha256 -extensions req_ext -extfile middleware-san.cnf
+    -out middleware-cert.pem -days 3650 -sha256 -extensions v3_ext -extfile middleware-san.cnf
+
+echo "Middleware certificate SANs:"
+openssl x509 -in middleware-cert.pem -noout -text | grep -A1 "Subject Alternative Name"
 
 # Create Middleware Keystore
 openssl pkcs12 -export -in middleware-cert.pem -inkey middleware-key.pem \
@@ -103,7 +136,7 @@ openssl pkcs12 -export -in middleware-cert.pem -inkey middleware-key.pem \
 keytool -importcert -alias root-ca -file root-ca.pem -keystore middleware-truststore.p12 \
     -storetype PKCS12 -storepass "$PASSWORD" -noprompt
 
-# Generate Client Cert (for user-bff)
+# Generate Client Cert (for user-bff) - signed by SAME CA
 cat > client-san.cnf << EOF
 [req]
 default_bits = 2048
@@ -111,14 +144,14 @@ prompt = no
 default_md = sha256
 distinguished_name = dn
 req_extensions = req_ext
+x509_extensions = v3_ext
 [dn]
 C = US
-ST = California
-L = SF
 O = Netflix
-OU = UserBFF
-CN = user-bff-client
+CN = user-bff
 [req_ext]
+subjectAltName = @alt_names
+[v3_ext]
 subjectAltName = @alt_names
 [alt_names]
 DNS.1 = user-bff
@@ -129,7 +162,7 @@ EOF
 openssl genrsa -out client-key.pem 2048
 openssl req -new -key client-key.pem -out client.csr -config client-san.cnf
 openssl x509 -req -in client.csr -CA root-ca.pem -CAkey root-ca-key.pem -CAcreateserial \
-    -out client-cert.pem -days 3650 -sha256 -extensions req_ext -extfile client-san.cnf
+    -out client-cert.pem -days 3650 -sha256 -extensions v3_ext -extfile client-san.cnf
 
 # Create Client Keystore
 openssl pkcs12 -export -in client-cert.pem -inkey client-key.pem \
@@ -140,11 +173,13 @@ openssl pkcs12 -export -in client-cert.pem -inkey client-key.pem \
 keytool -importcert -alias root-ca -file root-ca.pem -keystore client-truststore.p12 \
     -storetype PKCS12 -storepass "$PASSWORD" -noprompt
 
-# Cleanup
+# Cleanup temp files
 rm -f *.csr *.srl *.cnf
 
-chown -R apps:apps $CERTS_DIR
-chmod 600 $CERTS_DIR/*.p12
+# Set permissions
+chmod 644 $CERTS_DIR/*.pem
+chmod 644 $CERTS_DIR/*.p12
+chown -R $SERVICE_NAME:$SERVICE_NAME $CERTS_DIR
 
 echo "Certificates generated:"
 ls -la $CERTS_DIR
@@ -156,9 +191,8 @@ mvn -pl services/mtls-middleware -am clean package -DskipTests -q || {
     exit 1
 }
 
-# Copy jar
 cp /opt/$SERVICE_NAME/repo/services/mtls-middleware/target/mtls-middleware.jar /opt/$SERVICE_NAME/app.jar
-chown apps:apps /opt/$SERVICE_NAME/app.jar
+chown $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME/app.jar
 
 echo "[8/11] Creating systemd service..."
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
@@ -168,17 +202,25 @@ After=network.target
 
 [Service]
 Type=simple
-User=apps
-Group=apps
+User=$SERVICE_NAME
+Group=$SERVICE_NAME
 Environment="JAVA_OPTS=$JAVA_OPTS"
-Environment="CONFIG_SERVER_HOST=$CONFIG_HOST"
-Environment="EUREKA_HOST=$EUREKA_HOST"
-Environment="BACKEND_HOST=$BACKEND_HOST"
 Environment="KEYSTORE_PATH=/opt/$SERVICE_NAME/certs/middleware-keystore.p12"
 Environment="KEYSTORE_PASSWORD=$PASSWORD"
 Environment="TRUSTSTORE_PATH=/opt/$SERVICE_NAME/certs/middleware-truststore.p12"
 Environment="TRUSTSTORE_PASSWORD=$PASSWORD"
-ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar
+ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar \
+    --spring.config.import=optional:configserver:http://$CONFIG_HOST:8888 \
+    --eureka.client.service-url.defaultZone=http://$EUREKA_HOST:8761/eureka \
+    --backend.url=http://$BACKEND_HOST:8082 \
+    --server.ssl.key-store=file:/opt/$SERVICE_NAME/certs/middleware-keystore.p12 \
+    --server.ssl.key-store-password=$PASSWORD \
+    --server.ssl.key-store-type=PKCS12 \
+    --server.ssl.key-alias=middleware \
+    --server.ssl.trust-store=file:/opt/$SERVICE_NAME/certs/middleware-truststore.p12 \
+    --server.ssl.trust-store-password=$PASSWORD \
+    --server.ssl.trust-store-type=PKCS12 \
+    --server.ssl.client-auth=need
 WorkingDirectory=/opt/$SERVICE_NAME
 Restart=always
 RestartSec=10
@@ -196,25 +238,27 @@ systemctl start $SERVICE_NAME
 
 echo "[10/11] Waiting for service to be healthy..."
 for i in {1..60}; do
-    if curl -sk https://localhost:$SERVICE_PORT/middleware/health 2>/dev/null | grep -q "healthy"; then
-        echo "$SERVICE_NAME is UP!"
-        break
-    fi
-    # Try management port as fallback
+    # Check management port (HTTP)
     if curl -s http://localhost:8444/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
-        echo "$SERVICE_NAME is UP (via management port)!"
+        echo "$SERVICE_NAME is UP!"
         break
     fi
     echo "Waiting... ($i/60)"
     sleep 5
 done
 
-echo "[11/11] Outputting cert info for other services..."
-echo "Client certificates are at: /opt/$SERVICE_NAME/certs/"
-echo "Copy client-keystore.p12 and client-truststore.p12 to user-bff"
+echo "[11/11] Testing HTTPS endpoint..."
+sleep 5
+curl -sk https://localhost:$SERVICE_PORT/actuator/health || echo "HTTPS requires client cert (expected)"
 
 echo "=========================================="
 echo "mTLS Middleware provisioning complete!"
-echo "Service URL: https://localhost:$SERVICE_PORT"
-echo "Management URL: http://localhost:8444/actuator/health"
+echo "HTTPS Port: $SERVICE_PORT (requires client cert)"
+echo "Management Port: 8444 (HTTP)"
+echo "Private IP: $PRIVATE_IP"
+echo ""
+echo "Client certs for user-bff available at:"
+echo "  - /opt/$SERVICE_NAME/certs/client-keystore.p12"
+echo "  - /opt/$SERVICE_NAME/certs/client-truststore.p12"
+echo "  - /opt/$SERVICE_NAME/certs/root-ca.pem"
 echo "=========================================="

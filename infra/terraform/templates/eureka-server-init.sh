@@ -1,7 +1,6 @@
 #!/bin/bash
 #
 # Eureka Server Initialization Script
-# This runs on first boot via cloud-init
 #
 
 set -e
@@ -20,41 +19,58 @@ SERVICE_PORT="${service_port}"
 CONFIG_HOST="${config_host}"
 JAVA_OPTS="${java_opts}"
 
+# Get instance metadata
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+PRIVATE_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+PUBLIC_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
+HOSTNAME=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-hostname)
+
+echo "Instance Info: Private=$PRIVATE_IP, Public=$PUBLIC_IP, Hostname=$HOSTNAME"
+
 # System update and dependencies
 echo "[1/9] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get upgrade -y
+apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 echo "[2/9] Installing Java 17, Maven, and Git..."
 apt-get install -y openjdk-17-jdk maven git curl jq
 
-# Verify installations
-java -version
-mvn -version
-
 echo "[3/9] Creating service user and directories..."
-useradd -r -s /bin/false apps || true
+useradd -r -s /bin/false $SERVICE_NAME || true
 mkdir -p /opt/$SERVICE_NAME
 mkdir -p /var/log/$SERVICE_NAME
-chown -R apps:apps /opt/$SERVICE_NAME
-chown -R apps:apps /var/log/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
-echo "[4/9] Waiting for Config Server to be available..."
+echo "[4/9] Waiting for Config Server..."
 for i in {1..60}; do
-    if curl -s http://$CONFIG_HOST:8888/actuator/health | grep -q '"status":"UP"'; then
+    if curl -s http://$CONFIG_HOST:8888/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "Config Server is available!"
         break
     fi
-    echo "Waiting for Config Server... ($i/60)"
+    echo "Waiting for Config Server at $CONFIG_HOST:8888... ($i/60)"
     sleep 10
 done
 
-echo "[5/9] Cloning repository..."
+echo "[5/9] Cloning repository (with retries)..."
 cd /opt/$SERVICE_NAME
-git clone --branch $GIT_BRANCH $GIT_REPO_URL repo || {
-    echo "Git clone failed!"
-    mkdir -p repo
-}
+MAX_RETRIES=10
+RETRY_DELAY=30
+for i in $(seq 1 $MAX_RETRIES); do
+    echo "Git clone attempt $i of $MAX_RETRIES..."
+    if git clone --branch $GIT_BRANCH $GIT_REPO_URL repo; then
+        echo "Git clone successful!"
+        break
+    else
+        echo "Git clone failed, waiting $RETRY_DELAY seconds..."
+        sleep $RETRY_DELAY
+        if [ $i -eq $MAX_RETRIES ]; then
+            echo "ERROR: Git clone failed after $MAX_RETRIES attempts!"
+            exit 1
+        fi
+    fi
+done
 
 echo "[6/9] Building service..."
 cd /opt/$SERVICE_NAME/repo
@@ -63,11 +79,8 @@ mvn -pl services/eureka-server -am clean package -DskipTests -q || {
     exit 1
 }
 
-# Copy jar
 cp /opt/$SERVICE_NAME/repo/services/eureka-server/target/eureka-server.jar /opt/$SERVICE_NAME/app.jar
-chown apps:apps /opt/$SERVICE_NAME/app.jar
-
-PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+chown $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME/app.jar
 
 echo "[7/9] Creating systemd service..."
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
@@ -77,12 +90,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=apps
-Group=apps
+User=$SERVICE_NAME
+Group=$SERVICE_NAME
 Environment="JAVA_OPTS=$JAVA_OPTS"
 Environment="CONFIG_SERVER_HOST=$CONFIG_HOST"
-Environment="EUREKA_HOST=$PRIVATE_IP"
-ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar
+ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar --spring.config.import=optional:configserver:http://$CONFIG_HOST:8888
 WorkingDirectory=/opt/$SERVICE_NAME
 Restart=always
 RestartSec=10
@@ -98,10 +110,10 @@ systemctl daemon-reload
 systemctl enable $SERVICE_NAME
 systemctl start $SERVICE_NAME
 
-echo "[9/9] Waiting for Eureka Server to be healthy..."
+echo "[9/9] Waiting for service to be healthy..."
 for i in {1..60}; do
     if curl -s http://localhost:$SERVICE_PORT/actuator/health | grep -q '"status":"UP"'; then
-        echo "Eureka Server is UP!"
+        echo "$SERVICE_NAME is UP!"
         break
     fi
     echo "Waiting... ($i/60)"
@@ -110,6 +122,5 @@ done
 
 echo "=========================================="
 echo "Eureka Server provisioning complete!"
-echo "Service URL: http://localhost:$SERVICE_PORT"
-echo "Dashboard: http://localhost:$SERVICE_PORT"
+echo "Dashboard: http://$PRIVATE_IP:$SERVICE_PORT"
 echo "=========================================="

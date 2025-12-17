@@ -18,6 +18,9 @@ spring:
 backend:
   url: http://${BACKEND_HOST:localhost}:8082
 
+certs:
+  directory: /opt/mtls-middleware/certs
+
 eureka:
   client:
     service-url:

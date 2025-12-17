@@ -1,7 +1,6 @@
 #!/bin/bash
 #
 # Cloud Gateway Initialization Script
-# Final service in the chain
 #
 
 set -e
@@ -22,37 +21,58 @@ EUREKA_HOST="${eureka_host}"
 USERBFF_HOST="${userbff_host}"
 JAVA_OPTS="${java_opts}"
 
+# Get instance metadata
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+PRIVATE_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+PUBLIC_IP=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
+HOSTNAME=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-hostname)
+
+echo "Instance Info: Private=$PRIVATE_IP, Public=$PUBLIC_IP, Hostname=$HOSTNAME"
+
 # System update and dependencies
 echo "[1/9] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get upgrade -y
+apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"
 
 echo "[2/9] Installing Java 17, Maven, and Git..."
 apt-get install -y openjdk-17-jdk maven git curl jq
 
 echo "[3/9] Creating service user and directories..."
-useradd -r -s /bin/false apps || true
+useradd -r -s /bin/false $SERVICE_NAME || true
 mkdir -p /opt/$SERVICE_NAME
 mkdir -p /var/log/$SERVICE_NAME
-chown -R apps:apps /opt/$SERVICE_NAME
-chown -R apps:apps /var/log/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME
+chown -R $SERVICE_NAME:$SERVICE_NAME /var/log/$SERVICE_NAME
 
 echo "[4/9] Waiting for User BFF to be available..."
-for i in {1..90}; do
-    if curl -s http://$USERBFF_HOST:8081/actuator/health | grep -q '"status":"UP"'; then
+for i in {1..120}; do
+    if curl -s http://$USERBFF_HOST:8081/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
         echo "User BFF is available!"
         break
     fi
-    echo "Waiting for User BFF... ($i/90)"
+    echo "Waiting for User BFF at $USERBFF_HOST:8081... ($i/120)"
     sleep 10
 done
 
-echo "[5/9] Cloning repository..."
+echo "[5/9] Cloning repository (with retries)..."
 cd /opt/$SERVICE_NAME
-git clone --branch $GIT_BRANCH $GIT_REPO_URL repo || {
-    echo "Git clone failed!"
-    mkdir -p repo
-}
+MAX_RETRIES=10
+RETRY_DELAY=30
+for i in $(seq 1 $MAX_RETRIES); do
+    echo "Git clone attempt $i of $MAX_RETRIES..."
+    if git clone --branch $GIT_BRANCH $GIT_REPO_URL repo; then
+        echo "Git clone successful!"
+        break
+    else
+        echo "Git clone failed, waiting $RETRY_DELAY seconds..."
+        sleep $RETRY_DELAY
+        if [ $i -eq $MAX_RETRIES ]; then
+            echo "ERROR: Git clone failed after $MAX_RETRIES attempts!"
+            exit 1
+        fi
+    fi
+done
 
 echo "[6/9] Building service..."
 cd /opt/$SERVICE_NAME/repo
@@ -61,9 +81,8 @@ mvn -pl services/cloud-gateway -am clean package -DskipTests -q || {
     exit 1
 }
 
-# Copy jar
 cp /opt/$SERVICE_NAME/repo/services/cloud-gateway/target/cloud-gateway.jar /opt/$SERVICE_NAME/app.jar
-chown apps:apps /opt/$SERVICE_NAME/app.jar
+chown $SERVICE_NAME:$SERVICE_NAME /opt/$SERVICE_NAME/app.jar
 
 echo "[7/9] Creating systemd service..."
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
@@ -73,12 +92,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=apps
-Group=apps
+User=$SERVICE_NAME
+Group=$SERVICE_NAME
 Environment="JAVA_OPTS=$JAVA_OPTS"
-Environment="CONFIG_SERVER_HOST=$CONFIG_HOST"
-Environment="EUREKA_HOST=$EUREKA_HOST"
-ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar
+ExecStart=/usr/bin/java \$JAVA_OPTS -jar /opt/$SERVICE_NAME/app.jar \
+    --spring.config.import=optional:configserver:http://$CONFIG_HOST:8888 \
+    --eureka.client.service-url.defaultZone=http://$EUREKA_HOST:8761/eureka
 WorkingDirectory=/opt/$SERVICE_NAME
 Restart=always
 RestartSec=10
@@ -104,18 +123,8 @@ for i in {1..60}; do
     sleep 5
 done
 
-# Final health check
-echo "Testing full chain via Gateway..."
-sleep 15
-curl -s -X POST http://localhost:$SERVICE_PORT/api/rest/echo \
-    -H "Content-Type: application/json" \
-    -d '{"type":"sanity","message":"gateway-test","amount":99}' || echo "Full chain test pending..."
-
 echo "=========================================="
 echo "Cloud Gateway provisioning complete!"
-echo "Service URL: http://localhost:$SERVICE_PORT"
-echo "=========================================="
-echo ""
-echo "All services deployed! Stack is ready."
-echo "Gateway is publicly accessible on port 8080"
+echo "Public URL: http://$PUBLIC_IP:$SERVICE_PORT"
+echo "Private URL: http://$PRIVATE_IP:$SERVICE_PORT"
 echo "=========================================="
