@@ -4,12 +4,13 @@ resource "null_resource" "wait_for_services" {
 
   provisioner "local-exec" {
     command = <<-EOT
-      echo "Waiting for all services to be fully ready..."
-      echo "This takes approximately 15-20 minutes for all services to deploy and start."
-      sleep 900
-      echo "Services should be ready now."
+      Write-Host "Waiting for all services to be fully ready..."
+      Write-Host "This takes approximately 15-20 minutes for all services to deploy and start."
+      Write-Host "Gateway Public IP: ${aws_instance.cloud_gateway.public_ip}"
+      Start-Sleep -Seconds 900
+      Write-Host "Services should be ready now."
     EOT
-    interpreter = ["bash", "-c"]
+    interpreter = ["PowerShell", "-Command"]
   }
 }
 
@@ -21,27 +22,8 @@ resource "null_resource" "run_sanity_tests" {
   }
 
   provisioner "local-exec" {
-    command = <<-EOT
-      cd ${path.module}/../../scripts/sanity
-      chmod +x run_sanity.sh
-      ./run_sanity.sh ${aws_instance.cloud_gateway.public_ip}
-    EOT
-    interpreter = ["bash", "-c"]
-    working_dir = path.module
-  }
-}
-
-# For Windows users, alternative using PowerShell
-resource "null_resource" "run_sanity_tests_windows" {
-  count      = 0 # Set to 1 if running on Windows
-  depends_on = [null_resource.wait_for_services]
-
-  triggers = {
-    gateway_ip = aws_instance.cloud_gateway.public_ip
-  }
-
-  provisioner "local-exec" {
     command     = "powershell -ExecutionPolicy Bypass -File ${path.module}/../../scripts/sanity/run_sanity.ps1 -GatewayIP ${aws_instance.cloud_gateway.public_ip}"
     interpreter = ["PowerShell", "-Command"]
+    working_dir = path.module
   }
 }
