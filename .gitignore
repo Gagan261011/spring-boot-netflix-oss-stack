@@ -1,0 +1,51 @@
+# Maven
+target/
+*.jar
+*.war
+*.ear
+
+# IDE
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!terraform.tfvars.example
+.terraform.lock.hcl
+
+# Certificates (generated)
+scripts/certs/*.pem
+scripts/certs/*.p12
+scripts/certs/*.csr
+scripts/certs/*.srl
+scripts/certs/*.cnf
+
+# Reports (generated)
+reports/*.json
+reports/*.html
+!reports/README.md
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Node (if any frontend)
+node_modules/

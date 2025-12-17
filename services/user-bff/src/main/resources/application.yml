@@ -1,0 +1,48 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: user-bff
+  config:
+    import: optional:configserver:http://${CONFIG_SERVER_HOST:localhost}:8888
+  graphql:
+    graphiql:
+      enabled: true
+    path: /graphql
+    schema:
+      locations: classpath:graphql/
+
+middleware:
+  url: https://${MIDDLEWARE_HOST:localhost}:8443
+
+mtls:
+  client:
+    keystore:
+      path: ${KEYSTORE_PATH:/opt/user-bff/certs/client-keystore.p12}
+      password: ${KEYSTORE_PASSWORD:changeit}
+    truststore:
+      path: ${TRUSTSTORE_PATH:/opt/user-bff/certs/client-truststore.p12}
+      password: ${TRUSTSTORE_PASSWORD:changeit}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:8761/eureka/
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.netflix.oss.stack.bff: DEBUG
+    org.springframework.ws: DEBUG
+    org.springframework.graphql: DEBUG

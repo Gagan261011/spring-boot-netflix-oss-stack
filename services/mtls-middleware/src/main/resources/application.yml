@@ -1,0 +1,49 @@
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    key-store: ${KEYSTORE_PATH:/opt/mtls-middleware/certs/middleware-keystore.p12}
+    key-store-password: ${KEYSTORE_PASSWORD:changeit}
+    key-store-type: PKCS12
+    key-alias: middleware
+    trust-store: ${TRUSTSTORE_PATH:/opt/mtls-middleware/certs/middleware-truststore.p12}
+    trust-store-password: ${TRUSTSTORE_PASSWORD:changeit}
+    trust-store-type: PKCS12
+    client-auth: need
+
+spring:
+  application:
+    name: mtls-middleware
+  config:
+    import: optional:configserver:http://${CONFIG_SERVER_HOST:localhost}:8888
+
+backend:
+  url: http://${BACKEND_HOST:localhost}:8082
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://${EUREKA_HOST:localhost}:8761/eureka/
+  instance:
+    prefer-ip-address: true
+    secure-port-enabled: true
+    secure-port: 8443
+    non-secure-port-enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  server:
+    port: 8444
+    ssl:
+      enabled: false
+
+logging:
+  level:
+    com.netflix.oss.stack.middleware: DEBUG
+    org.springframework.security: DEBUG

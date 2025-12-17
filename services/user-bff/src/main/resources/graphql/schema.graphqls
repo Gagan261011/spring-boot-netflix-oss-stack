@@ -1,0 +1,21 @@
+type Query {
+    health: String
+}
+
+type Mutation {
+    process(type: String!, message: String!, amount: Float!): ProcessedResponse
+}
+
+type ProcessedResponse {
+    requestId: String
+    originalType: String
+    originalMessage: String
+    originalAmount: Float
+    computedOutput: String
+    processedBy: String
+    instanceInfo: String
+    timestamp: String
+    clientCertSubject: String
+    clientCertSerial: String
+    middlewareProcessed: Boolean
+}

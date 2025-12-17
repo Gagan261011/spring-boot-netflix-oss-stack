@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:tns="http://netflix.oss.stack/bff/soap"
+           targetNamespace="http://netflix.oss.stack/bff/soap"
+           elementFormDefault="qualified">
+
+    <xs:element name="ProcessRequestMessage">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="type" type="xs:string"/>
+                <xs:element name="message" type="xs:string"/>
+                <xs:element name="amount" type="xs:double"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:element name="ProcessResponseMessage">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="requestId" type="xs:string"/>
+                <xs:element name="originalType" type="xs:string"/>
+                <xs:element name="originalMessage" type="xs:string"/>
+                <xs:element name="originalAmount" type="xs:double"/>
+                <xs:element name="computedOutput" type="xs:string"/>
+                <xs:element name="processedBy" type="xs:string"/>
+                <xs:element name="instanceInfo" type="xs:string"/>
+                <xs:element name="timestamp" type="xs:string"/>
+                <xs:element name="clientCertSubject" type="xs:string"/>
+                <xs:element name="clientCertSerial" type="xs:string"/>
+                <xs:element name="middlewareProcessed" type="xs:boolean"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+</xs:schema>

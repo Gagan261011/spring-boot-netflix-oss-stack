@@ -1,0 +1,10 @@
+# Terraform Variables Example
+# Copy this file to terraform.tfvars and update values
+
+aws_region    = "us-east-1"
+admin_cidr    = "YOUR_IP/32"  # Replace with your IP for SSH access
+key_pair_name = "your-key-pair"  # Your AWS EC2 key pair name
+git_repo_url  = "https://github.com/your-org/spring-boot-netflix-oss-stack.git"
+git_branch    = "main"
+instance_type = "t3.medium"
+project_name  = "netflix-oss-stack"
